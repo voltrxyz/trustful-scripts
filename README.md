@@ -299,8 +299,6 @@ This file complements `config/base.ts` and holds parameters specific to the trus
 
 ### New Admin Scripts
 
-- **`src/scripts/admin-init-vault.ts`** (Same as base scripts, fully compatible)
-
 - **`src/scripts/admin-add-adaptor.ts`**
   - **Purpose:** Enables the vault to use trustful strategies by adding the official Voltr Arbitrary Adaptor program (`ADAPTOR_PROGRAM_ID` found in `src/constants/trustful.ts`) to the vault's list of approved adaptors. This only needs to be run once per vault.
   - **Requires:** `vaultAddress` (from `config/base.ts`).

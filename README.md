@@ -269,3 +269,119 @@ Feel free to extend these base scripts for more specific use cases or integratio
 ---
 
 For questions or support regarding the Voltr protocol itself, please refer to the official Voltr documentation.
+
+---
+
+## Trustful Strategy Extensions (voltr-trustful-scripts)
+
+The following sections detail the additions specific to the `voltr-trustful-scripts` project, which builds upon the base functionality to include trustful strategy interactions that can be used for custom integrations like Backpack.
+
+### Additional Configuration (`config/trustful.ts`)
+
+This file complements `config/base.ts` and holds parameters specific to the trustful strategy.
+
+- **Strategy Action Parameters:**
+
+  - `depositStrategyAmount`: **Required.** The amount of the **vault's base asset** (defined in `config/base.ts`) to deposit into the trustful strategy, denominated in the smallest units of the base asset (e.g., 1,000,000 for 1 USDC).
+  - `withdrawStrategyAmount`: **Required.** The amount of the **vault's base asset** to withdraw from the trustful strategy, denominated in the smallest units of the base asset.
+
+- **Strategy Position Values:**
+
+  - `positionValueAfterDeposit`: **Required.** The expected position value after the deposit operation. This updates the vault's accounting of the strategy's value.
+  - `positionValueAfterWithdraw`: **Required.** The expected position value after the withdrawal operation. This is typically 0 for a full withdrawal or the remaining balance for a partial withdrawal.
+
+- **Strategy Destination:**
+
+  - `destinationAssetTokenAccount`: **Required for deposit.** The token account where the strategy will transfer funds. This is an external account that the strategy will interact with.
+
+- **Strategy Seeds:**
+  - `strategySeedString`: **Required.** The seed string used to derive the strategy account address. The project includes a predefined seed in `src/constants/trustful.ts` under `SEEDS.BACKPACK`.
+
+### New Admin Scripts
+
+- **`src/scripts/admin-init-vault.ts`** (Same as base scripts, fully compatible)
+
+- **`src/scripts/admin-add-adaptor.ts`**
+  - **Purpose:** Enables the vault to use trustful strategies by adding the official Voltr Arbitrary Adaptor program (`ADAPTOR_PROGRAM_ID` found in `src/constants/trustful.ts`) to the vault's list of approved adaptors. This only needs to be run once per vault.
+  - **Requires:** `vaultAddress` (from `config/base.ts`).
+  - **Uses:** `ADMIN_FILE_PATH`. May update the vault's LUT if `useLookupTable` is true.
+
+### New Manager Scripts
+
+These scripts are executed by the vault's designated Manager.
+
+- **`src/scripts/manager-initialize-arbitrary.ts`**
+
+  - **Purpose:** Initializes the necessary on-chain accounts for the vault to interact with a trustful strategy via the Voltr trustful Adaptor. This initializes the strategy account derived from the specified seed string.
+  - **Requires:** `vaultAddress`, `assetMintAddress`, `assetTokenProgram` (from `config/base.ts`), and `strategySeedString` (from `config/trustful.ts`).
+  - **Uses:** `MANAGER_FILE_PATH`. May update the vault's LUT if `useLookupTable` is true.
+
+- **`src/scripts/manager-deposit-arbitrary.ts`**
+
+  - **Purpose:** Deposits funds _from_ the vault _into_ the initialized trustful strategy, transferring them to the specified destination account.
+  - **Requires:** `vaultAddress`, `assetMintAddress`, `assetTokenProgram` from `config/base.ts`. Also requires `depositStrategyAmount`, `positionValueAfterDeposit`, `destinationAssetTokenAccount`, and `strategySeedString` from `config/trustful.ts`.
+  - **Uses:** `MANAGER_FILE_PATH`.
+
+- **`src/scripts/manager-withdraw-arbitrary.ts`**
+  - **Purpose:** Withdraws funds _from_ the trustful strategy _back into_ the main vault account. Note this assumes the funds have already been transferred back to the vault strategy authority (different from the vault idle account) token account.
+  - **Requires:** `vaultAddress`, `assetMintAddress`, `assetTokenProgram` from `config/base.ts`. Also requires `withdrawStrategyAmount`, `positionValueAfterWithdraw`, and `strategySeedString` from `config/trustful.ts`.
+  - **Uses:** `MANAGER_FILE_PATH`.
+
+### Arbitrary Strategy Flow
+
+This outlines the typical sequence for setting up and managing the arbitrary strategy:
+
+1.  **Complete Basic Vault Setup:** Follow steps 1-4 in the [Basic Usage Flow](#basic-usage-flow) to initialize the vault and configure `config/base.ts`.
+2.  **Configure Arbitrary Parameters:** Edit `config/trustful.ts`. Define `depositStrategyAmount`, `withdrawStrategyAmount`, `positionValueAfterDeposit`, `positionValueAfterWithdraw`, `destinationAssetTokenAccount`, and `strategySeedString`.
+3.  **Add Arbitrary Adaptor (Admin):** Run `pnpm ts-node src/scripts/admin-add-adaptor.ts` to authorize the vault to use the trustful adaptor.
+4.  **Initialize Arbitrary Strategy (Manager):** Run `pnpm ts-node src/scripts/manager-initialize-arbitrary.ts` to set up the on-chain accounts for the trustful strategy interaction.
+5.  **Ensure Vault has Funds:** Use `user-deposit-vault.ts` (as the User) if the vault needs funds.
+6.  **Deposit into Arbitrary Strategy (Manager):** Run `pnpm ts-node src/scripts/manager-deposit-arbitrary.ts` to allocate funds from the vault to the trustful strategy destination.
+
+- **Note:** This transfers tokens to `destinationAssetTokenAccount` and updates the vault's accounting of the strategy value.
+
+6.  **Query Positions:** Use `query-strategy-positions.ts` to see the updated allocation in the trustful strategy.
+7.  **(External) Strategy Logic:** At this point, the trustful strategy (e.g., Backpack integration) would perform its operations with the funds sent to `destinationAssetTokenAccount`.
+8.  **(External) Return Funds:** Before withdrawing, funds must be manually returned to the vault strategy authority (different from the vault idle account) token account (displayed in console output from deposit step).
+9.  **Withdraw from Arbitrary Strategy (Manager):** Run `pnpm ts-node src/scripts/manager-withdraw-arbitrary.ts` to update the vault's accounting of returned funds from the arbitrary strategy.
+10. **(Optional) User Withdrawal:** Users can withdraw from the vault as usual using the `user-*` withdrawal scripts.
+
+### Protocol Integration Details
+
+- **Trustful Adaptor:** The scripts interact with an trustful protocol integration via the Voltr Trustful Adaptor (`3pnpK9nrs1R65eMV1wqCXkDkhSgN18xb1G5pgYPwoZjJ`). The necessary program IDs, seed strings, and instruction discriminators are defined in `src/constants/trustful.ts`.
+- **Trustful Design:** This adaptor follows a "trustful" design pattern, meaning it trusts the manager to accurately report position values and handle the actual strategy logic. The adaptor primarily serves as an accounting interface between the vault and external integrations.
+- **External Transfers:** Unlike other adaptors that may handle all token transfers internally, the trustful adaptor requires manual handling of token flows between the strategy and external destinations. The deposit operation transfers tokens from the vault to the specified destination, but returns must be manually sent back to the vault strategy authority (different from the vault idle account) token account before withdrawal accounting can be finalized.
+
+### Updated Project Structure (voltr-trustful-scripts)
+
+```
+voltr-trustful-scripts
+├── pnpm-lock.yaml
+├── config/
+│   ├── base.ts             # Base vault configuration
+│   └── trustful.ts        # ARBITRARY ADAPTOR: Trustful strategy config
+├── README.md               # This file (now including Trustful extensions)
+├── package.json            # Project metadata and dependencies
+├── tsconfig.json           # TypeScript compiler options
+└── src
+    ├── constants/
+    │   ├── base.ts         # Base constants (e.g., PROTOCOL_ADMIN)
+    │   └── trustful.ts    # TRUSTFUL ADAPTOR: Constants (program IDs, seeds, discriminators)
+    ├── utils/
+    │   └── helper.ts       # Core utility functions (tx sending, ATAs, LUTs)
+    └── scripts/            # Executable scripts
+        ├── user-withdraw-vault.ts
+        ├── user-query-position.ts
+        ├── query-strategy-positions.ts
+        ├── admin-update-vault.ts
+        ├── user-request-and-withdraw-vault.ts
+        ├── admin-harvest-fee.ts
+        ├── user-deposit-vault.ts
+        ├── admin-init-vault.ts
+        ├── admin-add-adaptor.ts            # TRUSTFUL ADAPTOR: Adds the trustful adaptor to the vault
+        ├── user-cancel-request-withdraw-vault.ts
+        ├── user-request-withdraw-vault.ts
+        ├── manager-initialize-arbitrary.ts  # TRUSTFUL ADAPTOR: Initializes arbitrary strategy
+        ├── manager-deposit-arbitrary.ts     # TRUSTFUL ADAPTOR: Deposits vault funds into arbitrary strategy
+        └── manager-withdraw-arbitrary.ts    # TRUSTFUL ADAPTOR: Withdraws funds from arbitrary strategy to vault
+```

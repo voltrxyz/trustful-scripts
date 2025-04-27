@@ -1,0 +1,12 @@
+export const ADAPTOR_PROGRAM_ID =
+  "3pnpK9nrs1R65eMV1wqCXkDkhSgN18xb1G5pgYPwoZjJ";
+
+export const SEEDS = {
+  BACKPACK: "backpack",
+};
+
+export const DISCRIMINATOR = {
+  INITIALIZE_ARBITRARY: [175, 175, 109, 31, 13, 152, 155, 237],
+  DEPOSIT_ARBITRARY: [117, 73, 131, 148, 12, 99, 191, 180],
+  WITHDRAW_ARBITRARY: [35, 58, 217, 109, 98, 184, 147, 14],
+};

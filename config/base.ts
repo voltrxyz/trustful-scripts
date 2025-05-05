@@ -21,6 +21,14 @@ export const vaultParams: VaultParams = {
   name: "",
   description: "",
 };
+
+// ONLY NEEDED IF YOU WANT TO SET LP TOKEN METADATA
+export const lpTokenMetadata = {
+  symbol: "",
+  name: "",
+  uri: "",
+};
+
 // MAIN ASSET DEPOSITED INTO VAULT
 export const assetMintAddress = "";
 export const assetTokenProgram = ""; // TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID

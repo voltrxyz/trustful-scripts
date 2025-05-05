@@ -7,8 +7,8 @@ export const vaultConfig: VaultConfig = {
   startAtTs: new BN(0),
   managerPerformanceFee: 500, // 500 = 5% in basis points
   adminPerformanceFee: 500, // 500 = 5% in basis points
-  managerManagementFee: 0, // management fee not yet implemented
-  adminManagementFee: 0, // management fee not yet implemented
+  managerManagementFee: 0, // 0 = 0% in basis points
+  adminManagementFee: 0, // 0 = 0% in basis points
   lockedProfitDegradationDuration: new BN(0), // profit will be realised linearly over time (seconds)
   redemptionFee: 0, // one time fee when withdrawing
   issuanceFee: 0, // one time fee when depositing

@@ -51,6 +51,15 @@ const depositArbitraryStrategy = async (
 
   let transactionIxs: TransactionInstruction[] = [];
 
+  const withdrawalHoldingAccount = await setupTokenAccount(
+    connection,
+    managerKp.publicKey,
+    vaultAssetMint,
+    strategy,
+    transactionIxs,
+    assetTokenProgram
+  );
+
   const vaultStrategyAssetAta = await setupTokenAccount(
     connection,
     managerKp.publicKey,
@@ -102,7 +111,7 @@ const depositArbitraryStrategy = async (
   console.log("Arbitrary strategy deposited with signature:", txSig);
   console.log(
     "IMPORTANT: To withdraw from strategy back to vault, transfer tokens back to:",
-    vaultStrategyAssetAta.toBase58()
+    withdrawalHoldingAccount.toBase58()
   );
 };
 

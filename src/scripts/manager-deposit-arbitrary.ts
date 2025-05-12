@@ -49,13 +49,18 @@ const depositArbitraryStrategy = async (
 
   const { vaultStrategyAuth } = vc.findVaultStrategyAddresses(vault, strategy);
 
+  const [withdrawalHoldingAuth] = PublicKey.findProgramAddressSync(
+    [vaultStrategyAuth.toBuffer(), strategy.toBuffer()],
+    new PublicKey(adaptorProgram)
+  );
+
   let transactionIxs: TransactionInstruction[] = [];
 
   const withdrawalHoldingAccount = await setupTokenAccount(
     connection,
     managerKp.publicKey,
     vaultAssetMint,
-    strategy,
+    withdrawalHoldingAuth,
     transactionIxs,
     assetTokenProgram
   );

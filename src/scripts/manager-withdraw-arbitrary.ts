@@ -47,13 +47,18 @@ const withdrawArbitraryStrategy = async (
 
   const { vaultStrategyAuth } = vc.findVaultStrategyAddresses(vault, strategy);
 
+  const [withdrawalHoldingAuth] = PublicKey.findProgramAddressSync(
+    [vaultStrategyAuth.toBuffer(), strategy.toBuffer()],
+    new PublicKey(adaptorProgram)
+  );
+
   let transactionIxs: TransactionInstruction[] = [];
 
   const withdrawalHoldingAccount = await setupTokenAccount(
     connection,
     managerKp.publicKey,
     vaultAssetMint,
-    strategy,
+    withdrawalHoldingAuth,
     transactionIxs,
     assetTokenProgram
   );
@@ -67,15 +72,12 @@ const withdrawArbitraryStrategy = async (
     assetTokenProgram
   );
 
-  const strategySeedStringBuffer = Buffer.from(strategySeedString);
-
   let additionalArgs = Buffer.from([
     ...new BN(endValue).toArrayLike(Buffer, "le", 8),
-    ...new BN(strategySeedStringBuffer.length).toArrayLike(Buffer, "le", 4),
-    ...strategySeedStringBuffer,
   ]);
 
   let remainingAccounts = [
+    { pubkey: withdrawalHoldingAuth, isWritable: false, isSigner: false },
     { pubkey: withdrawalHoldingAccount, isWritable: true, isSigner: false },
   ];
 

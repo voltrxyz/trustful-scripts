@@ -4,6 +4,7 @@
       "module": "CommonJS",
       "esModuleInterop": true,
       "strict": true,
+      "resolveJsonModule": true,
     },
     "include": ["src/**/*", "config/base.ts"]
   }

@@ -2,7 +2,6 @@ export const ADAPTOR_PROGRAM_ID =
   "3pnpK9nrs1R65eMV1wqCXkDkhSgN18xb1G5pgYPwoZjJ";
 
 export const SEEDS = {
-  BACKPACK: "backpack",
   CURVE: "curve",
 };
 

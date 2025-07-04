@@ -9,7 +9,7 @@ export const positionValueAfterWithdraw = 0;
 
 export const destinationAssetTokenAccount = "";
 
-export const strategySeedString = SEEDS.BACKPACK;
+export const strategySeedString = ""; // arbitrary string that best represents the strategy
 
 // CURVE VARIABLES:
 export const borrowRateBps = 0;

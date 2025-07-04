@@ -11,7 +11,11 @@ import {
   setupAddressLookupTable,
 } from "../utils/helper";
 import { VoltrClient } from "@voltr/vault-sdk";
-import { useLookupTable, vaultAddress } from "../../config/base";
+import {
+  lookupTableAddress,
+  useLookupTable,
+  vaultAddress,
+} from "../../config/base";
 import { ADAPTOR_PROGRAM_ID } from "../constants/trustful";
 
 const payerKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
@@ -55,11 +59,14 @@ const addAdaptorHandler = async () => {
       payer,
       payer,
       [
-        ...new Set([
-          ...createAddAdaptorIx.keys.map((k) => k.pubkey.toBase58()),
-        ]),
+        ...new Set(
+          transactionIxs0.flatMap((ix) =>
+            ix.keys.map((k) => k.pubkey.toBase58())
+          )
+        ),
       ],
-      transactionIxs1
+      transactionIxs1,
+      new PublicKey(lookupTableAddress)
     );
 
     const txSig1 = await sendAndConfirmOptimisedTx(

@@ -6,7 +6,7 @@ import { VoltrClient } from "@voltr/vault-sdk";
 import { vaultAddress } from "../../config/base";
 
 const pendingAdminKpFile = fs.readFileSync(
-  process.env.PENDING_ADMIN_FILE_PATH!,
+  process.env.ADMIN_FILE_PATH!,
   "utf-8"
 );
 const pendingAdminKpData = JSON.parse(pendingAdminKpFile);

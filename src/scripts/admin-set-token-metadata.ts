@@ -1,42 +1,38 @@
 import "dotenv/config";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import * as fs from "fs";
+import { createKeyPairSignerFromBytes } from "@solana/kit";
+import {
+  findLpMetadataPda,
+  getCreateLpMetadataInstructionAsync,
+} from "@voltr/vault-sdk";
 import { sendAndConfirmOptimisedTx } from "../utils/helper";
-import { VoltrClient } from "@voltr/vault-sdk";
 import { lpTokenMetadata, vaultAddress } from "../../config/base";
 
-const adminKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
-const adminKpData = JSON.parse(adminKpFile);
-const adminSecret = Uint8Array.from(adminKpData);
-const adminKp = Keypair.fromSecretKey(adminSecret);
-const admin = adminKp.publicKey;
-
-const vault = new PublicKey(vaultAddress);
-
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-
-const createLpMetadataHandler = async () => {
-  const createLpMetadataIx = await vc.createCreateLpMetadataIx(
-    lpTokenMetadata,
-    {
-      payer: admin,
-      admin,
-      vault,
-    }
+const main = async () => {
+  const adminSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8"))
   );
+  const adminSigner = await createKeyPairSignerFromBytes(adminSecret);
+
+  const [metadataAccount] = await findLpMetadataPda({ vault: vaultAddress });
+
+  const createLpMetadataIx = await getCreateLpMetadataInstructionAsync({
+    payer: adminSigner,
+    admin: adminSigner,
+    vault: vaultAddress,
+    metadataAccount,
+    name: lpTokenMetadata.name,
+    symbol: lpTokenMetadata.symbol,
+    uri: lpTokenMetadata.uri,
+  });
 
   const txSig = await sendAndConfirmOptimisedTx(
     [createLpMetadataIx],
     process.env.HELIUS_RPC_URL!,
-    adminKp
+    adminSigner
   );
 
   console.log(`Lp token metadata created with signature: ${txSig}`);
-};
-
-const main = async () => {
-  await createLpMetadataHandler();
 };
 
 main();

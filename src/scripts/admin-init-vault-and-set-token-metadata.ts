@@ -1,112 +1,133 @@
 import "dotenv/config";
-import {
-  AddressLookupTableProgram,
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
 import * as fs from "fs";
+import {
+  createKeyPairSignerFromBytes,
+  createSolanaRpc,
+  generateKeyPairSigner,
+  type Address,
+  type Instruction,
+} from "@solana/kit";
+import {
+  findAddressLookupTablePda,
+  getCreateLookupTableInstructionAsync,
+} from "@solana-program/address-lookup-table";
+import { findAssociatedTokenPda } from "@solana-program/token";
+import {
+  findLpMetadataPda,
+  findVaultAssetIdleAuthPda,
+  getCreateLpMetadataInstructionAsync,
+  getInitializeVaultInstructionAsync,
+} from "@voltr/vault-sdk";
 import {
   sendAndConfirmOptimisedTx,
   setupAddressLookupTable,
 } from "../utils/helper";
-import { VoltrClient } from "@voltr/vault-sdk";
 import {
   assetMintAddress,
+  assetTokenProgram,
   lpTokenMetadata,
   useLookupTable,
   vaultParams,
 } from "../../config/base";
 
-const adminKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
-const adminKpData = JSON.parse(adminKpFile);
-const adminSecret = Uint8Array.from(adminKpData);
-const adminKp = Keypair.fromSecretKey(adminSecret);
-const admin = adminKp.publicKey;
-
-const managerKpFile = fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8");
-const managerKpData = JSON.parse(managerKpFile);
-const managerSecret = Uint8Array.from(managerKpData);
-const managerKp = Keypair.fromSecretKey(managerSecret);
-const manager = managerKp.publicKey;
-
-const vaultKp = Keypair.generate();
-const vault = vaultKp.publicKey;
-const vaultAssetMint = new PublicKey(assetMintAddress);
-
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-
-const initVaultAndSetTokenMetadataHandler = async () => {
-  const createInitializeVaultIx = await vc.createInitializeVaultIx(
-    vaultParams,
-    {
-      vault,
-      vaultAssetMint,
-      admin,
-      manager,
-      payer: admin,
-    }
+const main = async () => {
+  const adminSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8"))
   );
+  const adminSigner = await createKeyPairSignerFromBytes(adminSecret);
 
-  const createLpMetadataIx = await vc.createCreateLpMetadataIx(
-    lpTokenMetadata,
-    {
-      payer: admin,
-      admin,
-      vault,
-    }
+  const managerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8"))
   );
+  const managerSigner = await createKeyPairSignerFromBytes(managerSecret);
 
-  const transactionIxs0: TransactionInstruction[] = [];
+  const vaultSigner = await generateKeyPairSigner();
 
-  transactionIxs0.push(createInitializeVaultIx);
-  transactionIxs0.push(createLpMetadataIx);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
+
+  const [vaultAssetIdleAuth] = await findVaultAssetIdleAuthPda({
+    vault: vaultSigner.address,
+  });
+  const [vaultAssetIdleAta] = await findAssociatedTokenPda({
+    owner: vaultAssetIdleAuth,
+    mint: assetMintAddress,
+    tokenProgram: assetTokenProgram,
+  });
+
+  const initializeVaultIx = await getInitializeVaultInstructionAsync({
+    payer: adminSigner,
+    admin: adminSigner.address,
+    manager: managerSigner.address,
+    vault: vaultSigner,
+    vaultAssetMint: assetMintAddress,
+    vaultAssetIdleAta,
+    assetTokenProgram,
+    ...vaultParams.config,
+    name: vaultParams.name,
+    description: vaultParams.description,
+  });
+
+  const [metadataAccount] = await findLpMetadataPda({
+    vault: vaultSigner.address,
+  });
+
+  const createLpMetadataIx = await getCreateLpMetadataInstructionAsync({
+    payer: adminSigner,
+    admin: adminSigner,
+    vault: vaultSigner.address,
+    metadataAccount,
+    name: lpTokenMetadata.name,
+    symbol: lpTokenMetadata.symbol,
+    uri: lpTokenMetadata.uri,
+  });
+
   const txSig0 = await sendAndConfirmOptimisedTx(
-    transactionIxs0,
+    [initializeVaultIx, createLpMetadataIx],
     process.env.HELIUS_RPC_URL!,
-    adminKp,
-    [vaultKp]
+    adminSigner
   );
 
-  await connection.confirmTransaction(txSig0, "finalized");
-  console.log(`Vault initialized and adaptor added with signature: ${txSig0}`);
+  console.log(`Vault initialized and metadata set with signature: ${txSig0}`);
   console.log(`Update below vault address into config/base.ts`);
-  console.log("Vault:", vault.toBase58());
+  console.log("Vault:", vaultSigner.address);
 
   if (useLookupTable) {
-    const [createLUTIx, lookupTable] =
-      AddressLookupTableProgram.createLookupTable({
-        authority: admin,
-        payer: admin,
-        recentSlot: await connection.getSlot(),
-      });
+    const slot = await rpc.getSlot().send();
+    const [lookupTable] = await findAddressLookupTablePda({
+      authority: adminSigner.address,
+      recentSlot: slot,
+    });
+
+    const createLUTIx = await getCreateLookupTableInstructionAsync({
+      authority: adminSigner.address,
+      payer: adminSigner,
+      recentSlot: slot,
+    });
 
     const txSig1 = await sendAndConfirmOptimisedTx(
       [createLUTIx],
       process.env.HELIUS_RPC_URL!,
-      adminKp,
-      [],
+      adminSigner,
       undefined,
       50_000
     );
 
     console.log(`LUT created with signature: ${txSig1}`);
     console.log(`Update below LUT address into config/base.ts`);
-    console.log("LUT:", lookupTable.toBase58());
+    console.log("LUT:", lookupTable);
 
-    const transactionIxs1: TransactionInstruction[] = [];
+    const transactionIxs1: Instruction[] = [];
+    const ixAddresses: Address[] = Array.from(
+      new Set(
+        (initializeVaultIx.accounts ?? []).map((a) => a.address as Address)
+      )
+    );
 
     await setupAddressLookupTable(
-      connection,
-      admin,
-      admin,
-      [
-        ...new Set([
-          ...createInitializeVaultIx.keys.map((k) => k.pubkey.toBase58()),
-        ]),
-      ],
+      rpc,
+      adminSigner,
+      adminSigner,
+      ixAddresses,
       transactionIxs1,
       lookupTable
     );
@@ -114,18 +135,13 @@ const initVaultAndSetTokenMetadataHandler = async () => {
     const txSig2 = await sendAndConfirmOptimisedTx(
       transactionIxs1,
       process.env.HELIUS_RPC_URL!,
-      adminKp,
-      [],
+      adminSigner,
       undefined,
       50_000
     );
 
     console.log(`LUT extended with signature: ${txSig2}`);
   }
-};
-
-const main = async () => {
-  await initVaultAndSetTokenMetadataHandler();
 };
 
 main();

@@ -1,42 +1,29 @@
 // NOTE: WILL ONLY SUCCEED IF THERE IS A REQUEST WITHDRAWAL OUTSTANDING
 import "dotenv/config";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
 import * as fs from "fs";
+import { createKeyPairSignerFromBytes } from "@solana/kit";
+import { getCancelRequestWithdrawVaultInstructionAsync } from "@voltr/vault-sdk";
 import { sendAndConfirmOptimisedTx } from "../utils/helper";
-import { VoltrClient } from "@voltr/vault-sdk";
 import { vaultAddress } from "../../config/base";
 
-const userKpFile = fs.readFileSync(process.env.USER_KP_FILE!, "utf-8");
-const userKpData = JSON.parse(userKpFile);
-const userSecret = Uint8Array.from(userKpData);
-const userKp = Keypair.fromSecretKey(userSecret);
-const user = userKp.publicKey;
+const main = async () => {
+  const userSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.USER_FILE_PATH!, "utf-8"))
+  );
+  const userSigner = await createKeyPairSignerFromBytes(userSecret);
 
-const vault = new PublicKey(vaultAddress);
-
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-
-const cancelRequestWithdrawVaultHandler = async () => {
-  const ixs: TransactionInstruction[] = [];
   const cancelRequestWithdrawVaultIx =
-    await vc.createCancelRequestWithdrawVaultIx({
-      userTransferAuthority: user,
-      vault,
+    await getCancelRequestWithdrawVaultInstructionAsync({
+      userTransferAuthority: userSigner,
+      vault: vaultAddress,
     });
-  ixs.push(cancelRequestWithdrawVaultIx);
 
   const txSig = await sendAndConfirmOptimisedTx(
-    ixs,
+    [cancelRequestWithdrawVaultIx],
     process.env.HELIUS_RPC_URL!,
-    userKp
+    userSigner
   );
-  console.log("Cancel Request Withdraw Vault Tx Sig: ", txSig);
+  console.log("Cancel Request Withdraw Vault Tx Sig:", txSig);
 };
 
-cancelRequestWithdrawVaultHandler();
+main();

@@ -1,108 +1,113 @@
 import "dotenv/config";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import * as fs from "fs";
+import {
+  AccountRole,
+  createKeyPairSignerFromBytes,
+  getAddressEncoder,
+  type AccountMeta,
+  type Address,
+} from "@solana/kit";
+import {
+  findVaultLpMintPda,
+  getUpdateVaultConfigInstructionAsync,
+  VaultConfigField,
+} from "@voltr/vault-sdk";
 import { sendAndConfirmOptimisedTx } from "../utils/helper";
-import { VoltrClient, VaultConfigField } from "@voltr/vault-sdk";
 import {
   vaultAddress,
   vaultConfigUpdateField,
   vaultConfigUpdateValue,
 } from "../../config/base";
-import { BN } from "@coral-xyz/anchor";
 
-const adminKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
-const adminKpData = JSON.parse(adminKpFile);
-const adminSecret = Uint8Array.from(adminKpData);
-const adminKp = Keypair.fromSecretKey(adminSecret);
-const admin = adminKp.publicKey;
-
-const vault = new PublicKey(vaultAddress);
-
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-
-/**
- * Serializes the vault config value based on the field type
- */
 const serializeVaultConfigValue = (
   field: VaultConfigField,
-  value: any
-): Buffer => {
+  value: bigint | number | Address
+): Uint8Array => {
   switch (field) {
-    // u64 fields (8 bytes, little-endian)
     case VaultConfigField.MaxCap:
     case VaultConfigField.StartAtTs:
     case VaultConfigField.LockedProfitDegradationDuration:
-    case VaultConfigField.WithdrawalWaitingPeriod:
-      if (!(value instanceof BN)) {
-        throw new Error(`Expected BN for field ${field}, got ${typeof value}`);
+    case VaultConfigField.WithdrawalWaitingPeriod: {
+      if (typeof value !== "bigint") {
+        throw new Error(`Expected bigint for field ${field}, got ${typeof value}`);
       }
-      return value.toArrayLike(Buffer, "le", 8);
+      const buf = Buffer.alloc(8);
+      buf.writeBigUInt64LE(value, 0);
+      return new Uint8Array(buf);
+    }
 
-    // u16 fields (2 bytes, little-endian)
     case VaultConfigField.ManagerPerformanceFee:
     case VaultConfigField.AdminPerformanceFee:
     case VaultConfigField.ManagerManagementFee:
     case VaultConfigField.AdminManagementFee:
     case VaultConfigField.RedemptionFee:
     case VaultConfigField.IssuanceFee:
-    case VaultConfigField.DisabledOperations:
+    case VaultConfigField.DisabledOperations: {
       if (typeof value !== "number") {
-        throw new Error(
-          `Expected number for field ${field}, got ${typeof value}`
-        );
+        throw new Error(`Expected number for field ${field}, got ${typeof value}`);
       }
-      const buffer = Buffer.alloc(2);
-      buffer.writeUInt16LE(value, 0);
-      return buffer;
+      const buf = Buffer.alloc(2);
+      buf.writeUInt16LE(value, 0);
+      return new Uint8Array(buf);
+    }
 
-    // PublicKey fields (32 bytes)
     case VaultConfigField.Manager:
-    case VaultConfigField.PendingAdmin:
-      if (!(value instanceof PublicKey)) {
-        throw new Error(
-          `Expected PublicKey for field ${field}, got ${typeof value}`
-        );
+    case VaultConfigField.PendingAdmin: {
+      if (typeof value !== "string") {
+        throw new Error(`Expected Address for field ${field}, got ${typeof value}`);
       }
-      return value.toBuffer();
+      return new Uint8Array(getAddressEncoder().encode(value as Address));
+    }
 
     default:
       throw new Error(`Unknown vault config field: ${field}`);
   }
 };
 
-const updateVaultConfigHandler = async () => {
-  // Serialize the value based on field type
+const main = async () => {
+  const adminSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8"))
+  );
+  const adminSigner = await createKeyPairSignerFromBytes(adminSecret);
+
   const data = serializeVaultConfigValue(
     vaultConfigUpdateField,
     vaultConfigUpdateValue
   );
 
-  // const vaultLpMint = vc.findVaultLpMint(vault); // needed for management fees update
-
-  const updateVaultConfigIx = await vc.createUpdateVaultConfigIx(
-    vaultConfigUpdateField,
+  const updateVaultConfigIx = await getUpdateVaultConfigInstructionAsync({
+    admin: adminSigner,
+    vault: vaultAddress,
+    field: vaultConfigUpdateField,
     data,
-    {
-      vault,
-      admin,
-      // vaultLpMint, // needed for management fees update
-    }
-  );
+  });
+
+  const requiresLpMint =
+    vaultConfigUpdateField === VaultConfigField.ManagerManagementFee ||
+    vaultConfigUpdateField === VaultConfigField.AdminManagementFee;
+
+  let finalIx: typeof updateVaultConfigIx = updateVaultConfigIx;
+  if (requiresLpMint) {
+    const [vaultLpMint] = await findVaultLpMintPda({ vault: vaultAddress });
+    const extraAccount: AccountMeta = {
+      address: vaultLpMint,
+      role: AccountRole.READONLY,
+    };
+    finalIx = {
+      ...updateVaultConfigIx,
+      accounts: [...(updateVaultConfigIx.accounts ?? []), extraAccount],
+    } as typeof updateVaultConfigIx;
+  }
 
   const txSig = await sendAndConfirmOptimisedTx(
-    [updateVaultConfigIx],
+    [finalIx],
     process.env.HELIUS_RPC_URL!,
-    adminKp
+    adminSigner
   );
 
   console.log(
-    `Vault config field '${vaultConfigUpdateField}' updated with signature: ${txSig}`
+    `Vault config field '${VaultConfigField[vaultConfigUpdateField]}' updated with signature: ${txSig}`
   );
-};
-
-const main = async () => {
-  await updateVaultConfigHandler();
 };
 
 main();

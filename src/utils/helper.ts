@@ -1,79 +1,106 @@
-import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import {
-  createAssociatedTokenAccountIdempotentInstruction,
-  getAssociatedTokenAddressSync,
-  TOKEN_PROGRAM_ID,
-} from "@solana/spl-token";
+  appendTransactionMessageInstructions,
+  compressTransactionMessageUsingAddressLookupTables,
+  createSolanaRpc,
+  createTransactionMessage,
+  getBase64EncodedWireTransaction,
+  getSignatureFromTransaction,
+  pipe,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransactionMessageWithSigners,
+  type Address,
+  type AddressesByLookupTableAddress,
+  type Blockhash,
+  type Instruction,
+  type KeyPairSigner,
+  type Signature,
+  type TransactionSigner,
+} from "@solana/kit";
 import {
-  AddressLookupTableAccount,
-  AddressLookupTableProgram,
-  ComputeBudgetProgram,
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionConfirmationStrategy,
-  TransactionInstruction,
-  TransactionMessage,
-  VersionedTransaction,
-} from "@solana/web3.js";
+  getSetComputeUnitLimitInstruction,
+  getSetComputeUnitPriceInstruction,
+} from "@solana-program/compute-budget";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
+  TOKEN_PROGRAM_ADDRESS,
+  findAssociatedTokenPda,
+  getCreateAssociatedTokenIdempotentInstructionAsync,
+} from "@solana-program/token";
+import {
+  fetchAddressLookupTable,
+  getExtendLookupTableInstruction,
+} from "@solana-program/address-lookup-table";
+
+type SolanaRpc = ReturnType<typeof createSolanaRpc>;
 
 export const sendAndConfirmOptimisedTx = async (
-  instructions: TransactionInstruction[],
+  instructions: Instruction[],
   heliusRpcUrl: string,
-  payerKp: Keypair,
-  signers: Keypair[] = [],
-  addressLookupTableAccounts: AddressLookupTableAccount[] = [],
+  payerSigner: KeyPairSigner,
+  addressesByLookupTable: AddressesByLookupTableAddress = {},
   computeUnitLimit: number | null = null
-) => {
-  const connection = new Connection(heliusRpcUrl);
+): Promise<Signature> => {
+  const rpc = createSolanaRpc(heliusRpcUrl);
+
+  const buildMessage = async (
+    ixs: Instruction[],
+    blockhash: { blockhash: Blockhash; lastValidBlockHeight: bigint }
+  ) => {
+    let m = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayerSigner(payerSigner, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash(blockhash, m),
+      (m) => appendTransactionMessageInstructions(ixs, m)
+    );
+    if (Object.keys(addressesByLookupTable).length > 0) {
+      m = compressTransactionMessageUsingAddressLookupTables(
+        m,
+        addressesByLookupTable
+      ) as typeof m;
+    }
+    return m;
+  };
+
   let optimalCUs: number;
   if (computeUnitLimit) {
     optimalCUs = computeUnitLimit;
   } else {
-    const testInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+    const { value: latest } = await rpc.getLatestBlockhash().send();
+    const simIxs: Instruction[] = [
+      getSetComputeUnitLimitInstruction({ units: 1_400_000 }),
       ...instructions,
     ];
+    const simMessage = await buildMessage(simIxs, latest);
+    const simSigned = await signTransactionMessageWithSigners(simMessage);
+    const wireSim = getBase64EncodedWireTransaction(simSigned);
 
-    const cuTransaction = new VersionedTransaction(
-      new TransactionMessage({
-        instructions: testInstructions,
-        payerKey: payerKp.publicKey,
-        recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
-      }).compileToV0Message(addressLookupTableAccounts)
-    );
-    cuTransaction.sign([payerKp, ...signers]);
+    const sim = await rpc
+      .simulateTransaction(wireSim, {
+        encoding: "base64",
+        replaceRecentBlockhash: true,
+        sigVerify: false,
+      })
+      .send();
 
-    const rpcResponse = await connection.simulateTransaction(cuTransaction, {
-      replaceRecentBlockhash: true,
-      sigVerify: false,
-    });
-
-    const requiredCUs = rpcResponse.value.unitsConsumed;
-
-    if (!requiredCUs) {
+    const requiredCUs = sim.value.unitsConsumed;
+    if (requiredCUs == null) {
       throw new Error("Failed to get required CUs");
     }
-
-    optimalCUs = requiredCUs * 1.1;
+    optimalCUs = Math.ceil(Number(requiredCUs) * 1.1);
   }
 
-  const computeUnitIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: optimalCUs,
-  });
+  const cuLimitIx = getSetComputeUnitLimitInstruction({ units: optimalCUs });
 
-  instructions.push(computeUnitIx);
-
-  const feTransaction = new VersionedTransaction(
-    new TransactionMessage({
-      instructions,
-      payerKey: payerKp.publicKey,
-      recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
-    }).compileToV0Message(addressLookupTableAccounts)
+  const { value: feeBlockhash } = await rpc.getLatestBlockhash().send();
+  const feeEstMessage = await buildMessage(
+    [...instructions, cuLimitIx],
+    feeBlockhash
   );
-  feTransaction.sign([payerKp, ...signers]);
+  const feeEstSigned = await signTransactionMessageWithSigners(feeEstMessage);
+  const wireFeeEst = getBase64EncodedWireTransaction(feeEstSigned);
 
-  const response = await fetch(heliusRpcUrl, {
+  const feeEstResp = await fetch(heliusRpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -82,133 +109,141 @@ export const sendAndConfirmOptimisedTx = async (
       method: "getPriorityFeeEstimate",
       params: [
         {
-          transaction: bs58.encode(feTransaction.serialize()), // Pass the serialized transaction in Base58
-          options: { priorityLevel: "High" },
+          transaction: wireFeeEst,
+          options: {
+            priorityLevel: "High",
+            transactionEncoding: "base64",
+          },
         },
       ],
     }),
   });
-  const data = await response.json();
-  const feeEstimate = data.result;
-
+  const feeEstData = await feeEstResp.json();
+  const feeEstimate = feeEstData.result;
   if (!feeEstimate) {
     throw new Error("Failed to get fee estimate");
   }
 
-  const computePriceIx = ComputeBudgetProgram.setComputeUnitPrice({
-    microLamports: feeEstimate.priorityFeeEstimate,
+  const cuPriceIx = getSetComputeUnitPriceInstruction({
+    microLamports: BigInt(Math.ceil(feeEstimate.priorityFeeEstimate)),
   });
 
-  instructions.push(computePriceIx);
-
-  const transaction = new VersionedTransaction(
-    new TransactionMessage({
-      instructions,
-      payerKey: payerKp.publicKey,
-      recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
-    }).compileToV0Message(addressLookupTableAccounts)
+  const { value: sendBlockhash } = await rpc.getLatestBlockhash().send();
+  const finalMessage = await buildMessage(
+    [...instructions, cuLimitIx, cuPriceIx],
+    sendBlockhash
   );
-  transaction.sign([payerKp, ...signers]);
+  const signed = await signTransactionMessageWithSigners(finalMessage);
+  const wire = getBase64EncodedWireTransaction(signed);
+  const signature = getSignatureFromTransaction(signed);
 
-  const txSig = await connection.sendTransaction(transaction, {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-    maxRetries: 5,
-  });
+  await rpc
+    .sendTransaction(wire, {
+      encoding: "base64",
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+      maxRetries: 5n,
+    })
+    .send();
 
-  const confirmationStrategy: TransactionConfirmationStrategy = {
-    signature: txSig,
-    blockhash: (await connection.getLatestBlockhash()).blockhash,
-    lastValidBlockHeight: (await connection.getLatestBlockhash())
-      .lastValidBlockHeight,
-  };
+  await confirmSignature(rpc, signature, sendBlockhash.lastValidBlockHeight);
 
-  await connection.confirmTransaction(confirmationStrategy, "confirmed");
+  return signature;
+};
 
-  return txSig;
+const confirmSignature = async (
+  rpc: SolanaRpc,
+  signature: Signature,
+  lastValidBlockHeight: bigint
+): Promise<void> => {
+  while (true) {
+    const { value } = await rpc
+      .getSignatureStatuses([signature], { searchTransactionHistory: true })
+      .send();
+    const status = value[0];
+    if (
+      status?.confirmationStatus === "confirmed" ||
+      status?.confirmationStatus === "finalized"
+    ) {
+      if (status.err) {
+        throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+      }
+      return;
+    }
+    const blockHeight = await rpc.getBlockHeight().send();
+    if (blockHeight > lastValidBlockHeight) {
+      throw new Error(
+        `Transaction expired: ${signature} not confirmed before lastValidBlockHeight ${lastValidBlockHeight}`
+      );
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
 };
 
 export const setupTokenAccount = async (
-  connection: Connection,
-  payer: PublicKey,
-  mint: PublicKey,
-  owner: PublicKey,
-  txIxs: TransactionInstruction[],
-  programId: PublicKey = TOKEN_PROGRAM_ID
-) => {
-  const tokenAccount = getAssociatedTokenAddressSync(
-    mint,
+  rpc: SolanaRpc,
+  payerSigner: TransactionSigner,
+  mint: Address,
+  owner: Address,
+  txIxs: Instruction[],
+  programAddress: Address = TOKEN_PROGRAM_ADDRESS
+): Promise<Address> => {
+  const [ata] = await findAssociatedTokenPda({
     owner,
-    true,
-    programId
-  );
+    mint,
+    tokenProgram: programAddress,
+  });
 
-  const tokenAccountInfo = await connection.getAccountInfo(tokenAccount);
+  const accountInfo = await rpc.getAccountInfo(ata).send();
 
-  if (!tokenAccountInfo) {
-    const createTokenAccountIx =
-      createAssociatedTokenAccountIdempotentInstruction(
-        payer,
-        tokenAccount,
-        owner,
-        mint,
-        programId
-      );
-    txIxs.push(createTokenAccountIx);
+  if (!accountInfo.value) {
+    const ix = await getCreateAssociatedTokenIdempotentInstructionAsync({
+      payer: payerSigner,
+      owner,
+      mint,
+      tokenProgram: programAddress,
+    });
+    txIxs.push(ix);
   }
 
-  return tokenAccount;
+  return ata;
 };
 
 export const setupAddressLookupTable = async (
-  connection: Connection,
-  payer: PublicKey,
-  authority: PublicKey,
-  addresses: string[],
-  txIxs: TransactionInstruction[],
-  lookupTable: PublicKey
-) => {
-  const lutAddressesStr: string[] = [];
-  const lutData = await connection.getAddressLookupTable(lookupTable);
-  lutAddressesStr.push(
-    ...(lutData.value?.state.addresses.map((a) => a.toBase58()) ?? [])
-  );
+  rpc: SolanaRpc,
+  payerSigner: TransactionSigner,
+  authoritySigner: TransactionSigner,
+  addresses: Address[],
+  txIxs: Instruction[],
+  lookupTable: Address
+): Promise<Address> => {
+  const lutAccount = await fetchAddressLookupTable(rpc, lookupTable);
+  const existing = new Set<string>(lutAccount.data.addresses);
+  const filtered = addresses.filter((a) => !existing.has(a));
 
-  const filteredUniqueIxsPubkeys = addresses
-    .filter((pubkey) => !lutAddressesStr.includes(pubkey))
-    .map((pubkey) => new PublicKey(pubkey));
-
-  if (filteredUniqueIxsPubkeys.length > 0) {
+  if (filtered.length > 0) {
     txIxs.push(
-      AddressLookupTableProgram.extendLookupTable({
-        lookupTable,
-        authority,
-        addresses: filteredUniqueIxsPubkeys,
-        payer,
+      getExtendLookupTableInstruction({
+        address: lookupTable,
+        authority: authoritySigner,
+        payer: payerSigner,
+        addresses: filtered,
       })
     );
   }
   return lookupTable;
 };
 
-export const getAddressLookupTableAccounts = async (
-  keys: string[],
-  connection: Connection
-): Promise<AddressLookupTableAccount[]> => {
-  const addressLookupTableAccountInfos =
-    await connection.getMultipleAccountsInfo(
-      keys.map((key) => new PublicKey(key))
-    );
-
-  return addressLookupTableAccountInfos.reduce((acc, accountInfo, index) => {
-    const addressLookupTableAddress = keys[index];
-    if (accountInfo) {
-      const addressLookupTableAccount = new AddressLookupTableAccount({
-        key: new PublicKey(addressLookupTableAddress),
-        state: AddressLookupTableAccount.deserialize(accountInfo.data),
-      });
-      acc.push(addressLookupTableAccount);
-    }
-    return acc;
-  }, new Array<AddressLookupTableAccount>());
+export const getAddressesByLookupTable = async (
+  keys: Address[],
+  rpc: SolanaRpc
+): Promise<AddressesByLookupTableAddress> => {
+  const result: AddressesByLookupTableAddress = {};
+  for (const key of keys) {
+    const lut = await fetchAddressLookupTable(rpc, key);
+    result[key] = [...lut.data.addresses];
+  }
+  return result;
 };
+
+export { ASSOCIATED_TOKEN_PROGRAM_ADDRESS, TOKEN_PROGRAM_ADDRESS };

@@ -1,101 +1,71 @@
 import "dotenv/config";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
 import * as fs from "fs";
-import { BN } from "@coral-xyz/anchor";
-import { sendAndConfirmOptimisedTx, setupTokenAccount } from "../utils/helper";
-import { createCloseAccountInstruction, NATIVE_MINT } from "@solana/spl-token";
-import { InstantWithdrawVaultArgs, VoltrClient } from "@voltr/vault-sdk";
 import {
-  vaultAddress,
-  withdrawAmountVault,
+  createKeyPairSignerFromBytes,
+  createSolanaRpc,
+  type Address,
+  type Instruction,
+} from "@solana/kit";
+import { getCloseAccountInstruction } from "@solana-program/token";
+import { getInstantWithdrawVaultInstructionAsync } from "@voltr/vault-sdk";
+import { sendAndConfirmOptimisedTx, setupTokenAccount } from "../utils/helper";
+import {
   assetMintAddress,
   assetTokenProgram,
-  isWithdrawInLp,
   isWithdrawAll,
+  isWithdrawInLp,
+  vaultAddress,
+  withdrawAmountVault,
 } from "../../config/base";
 
-const userKpFile = fs.readFileSync(process.env.USER_FILE_PATH!, "utf-8");
-const userKpData = JSON.parse(userKpFile);
-const userSecret = Uint8Array.from(userKpData);
-const userKp = Keypair.fromSecretKey(userSecret);
-const user = userKp.publicKey;
+const NATIVE_MINT = "So11111111111111111111111111111111111111112" as Address;
 
-const vault = new PublicKey(vaultAddress);
-const vaultAssetMint = new PublicKey(assetMintAddress);
-const vaultAssetTokenProgram = new PublicKey(assetTokenProgram);
+const main = async () => {
+  const userSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.USER_FILE_PATH!, "utf-8"))
+  );
+  const userSigner = await createKeyPairSignerFromBytes(userSecret);
 
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-const withdrawAmount = new BN(withdrawAmountVault);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
 
-const createInstantWithdrawVaultIxs = async (
-  withdrawAmount: BN,
-  isAmountInLp: boolean,
-  isWithdrawAll: boolean
-) => {
-  let ixs: TransactionInstruction[] = [];
+  const ixs: Instruction[] = [];
   const userAssetAta = await setupTokenAccount(
-    connection,
-    user,
-    vaultAssetMint,
-    user,
+    rpc,
+    userSigner,
+    assetMintAddress,
+    userSigner.address,
     ixs,
-    vaultAssetTokenProgram
+    assetTokenProgram
   );
 
-  const instantWithdrawVaultArgs: InstantWithdrawVaultArgs = {
-    amount: withdrawAmount,
-    isAmountInLp,
-    isWithdrawAll,
-  };
-
-  const instantWithdrawVaultIx = await vc.createInstantWithdrawVaultIx(
-    instantWithdrawVaultArgs,
-    {
-      userTransferAuthority: user,
-      vault,
-      vaultAssetMint,
-      assetTokenProgram: vaultAssetTokenProgram,
-    }
-  );
+  const instantWithdrawVaultIx =
+    await getInstantWithdrawVaultInstructionAsync({
+      userTransferAuthority: userSigner,
+      vault: vaultAddress,
+      vaultAssetMint: assetMintAddress,
+      assetTokenProgram,
+      amount: withdrawAmountVault,
+      isAmountInLp: isWithdrawInLp,
+      isWithdrawAll,
+    });
   ixs.push(instantWithdrawVaultIx);
 
-  if (vaultAssetMint.equals(NATIVE_MINT)) {
-    // Create close account instruction to convert wSOL back to SOL
-    const closeWsolAccountIx = createCloseAccountInstruction(
-      userAssetAta, // Account to close
-      user, // Destination account (SOL will be sent here)
-      user, // Authority
-      [] // No multisig signers
+  if (assetMintAddress === NATIVE_MINT) {
+    ixs.push(
+      getCloseAccountInstruction({
+        account: userAssetAta,
+        destination: userSigner.address,
+        owner: userSigner,
+      })
     );
-    ixs.push(closeWsolAccountIx);
   }
 
-  return ixs;
-};
-
-const instantWithdrawVaultHandler = async (
-  withdrawAmount: BN,
-  isAmountInLp: boolean,
-  isWithdrawAll: boolean
-) => {
-  const instantWithdrawVaultIxs = await createInstantWithdrawVaultIxs(
-    withdrawAmount,
-    isAmountInLp,
-    isWithdrawAll
-  );
-
   const txSig = await sendAndConfirmOptimisedTx(
-    instantWithdrawVaultIxs,
+    ixs,
     process.env.HELIUS_RPC_URL!,
-    userKp
+    userSigner
   );
-  console.log("Instant Withdraw Vault Tx Sig: ", txSig);
+  console.log("Instant Withdraw Vault Tx Sig:", txSig);
 };
 
-instantWithdrawVaultHandler(withdrawAmount, isWithdrawInLp, isWithdrawAll);
+main();

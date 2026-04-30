@@ -1,57 +1,62 @@
 import "dotenv/config";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
 import * as fs from "fs";
+import {
+  createKeyPairSignerFromBytes,
+  createSolanaRpc,
+  type Instruction,
+} from "@solana/kit";
+import {
+  findVaultLpMintPda,
+  getHarvestFeeInstructionAsync,
+} from "@voltr/vault-sdk";
 import { sendAndConfirmOptimisedTx, setupTokenAccount } from "../utils/helper";
 import { vaultAddress } from "../../config/base";
-import { VoltrClient } from "@voltr/vault-sdk";
 import { PROTOCOL_ADMIN } from "../constants/base";
 
-const adminKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
-const adminKpData = JSON.parse(adminKpFile);
-const adminSecret = Uint8Array.from(adminKpData);
-const adminKp = Keypair.fromSecretKey(adminSecret);
-const admin = adminKp.publicKey;
+const main = async () => {
+  const adminSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8"))
+  );
+  const adminSigner = await createKeyPairSignerFromBytes(adminSecret);
 
-const managerKpFile = fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8");
-const managerKpData = JSON.parse(managerKpFile);
-const managerSecret = Uint8Array.from(managerKpData);
-const managerKp = Keypair.fromSecretKey(managerSecret);
-const manager = managerKp.publicKey;
+  const managerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8"))
+  );
+  const managerSigner = await createKeyPairSignerFromBytes(managerSecret);
 
-const protocolAdmin = new PublicKey(PROTOCOL_ADMIN);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
 
-const vault = new PublicKey(vaultAddress);
-
-const connection = new Connection(process.env.HELIUS_RPC_URL!);
-const vc = new VoltrClient(connection);
-
-const harvestFeeHandler = async () => {
-  let transactionIxs: TransactionInstruction[] = [];
-  const lpMint = vc.findVaultLpMint(vault);
-
-  await setupTokenAccount(connection, admin, lpMint, admin, transactionIxs);
-
-  await setupTokenAccount(connection, admin, lpMint, manager, transactionIxs);
+  const transactionIxs: Instruction[] = [];
+  const [lpMint] = await findVaultLpMintPda({ vault: vaultAddress });
 
   await setupTokenAccount(
-    connection,
-    admin,
+    rpc,
+    adminSigner,
     lpMint,
-    protocolAdmin,
+    adminSigner.address,
+    transactionIxs
+  );
+  await setupTokenAccount(
+    rpc,
+    adminSigner,
+    lpMint,
+    managerSigner.address,
+    transactionIxs
+  );
+  await setupTokenAccount(
+    rpc,
+    adminSigner,
+    lpMint,
+    PROTOCOL_ADMIN,
     transactionIxs
   );
 
-  const harvestFeeIx = await vc.createHarvestFeeIx({
-    harvester: admin,
-    vaultManager: manager,
-    vaultAdmin: admin,
-    protocolAdmin,
-    vault,
+  const harvestFeeIx = await getHarvestFeeInstructionAsync({
+    harvester: adminSigner,
+    vaultManager: managerSigner.address,
+    vaultAdmin: adminSigner.address,
+    protocolAdmin: PROTOCOL_ADMIN,
+    vault: vaultAddress,
   });
 
   transactionIxs.push(harvestFeeIx);
@@ -59,14 +64,10 @@ const harvestFeeHandler = async () => {
   const txSig = await sendAndConfirmOptimisedTx(
     transactionIxs,
     process.env.HELIUS_RPC_URL!,
-    adminKp
+    adminSigner
   );
 
   console.log(`Harvested fee with signature: ${txSig}`);
-};
-
-const main = async () => {
-  await harvestFeeHandler();
 };
 
 main();

@@ -1,18 +1,23 @@
 import "dotenv/config";
 import * as fs from "fs";
+import { PublicKey } from "@solana/web3.js";
 import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
-import {
-  getAddressLookupTableAccounts,
+  appendRemainingAccounts,
+  publicKeyToAddress,
   sendAndConfirmOptimisedTx,
   setupTokenAccount,
 } from "../utils/helper";
 import { BN } from "@coral-xyz/anchor";
-import { VoltrClient } from "@voltr/vault-sdk";
+import {
+  address,
+  createKeyPairSignerFromBytes,
+  createSolanaRpc,
+  type Instruction,
+} from "@solana/kit";
+import {
+  findVaultStrategyAuthPda,
+  getWithdrawStrategyInstructionAsync,
+} from "@voltr/vault-sdk";
 import {
   assetMintAddress,
   vaultAddress,
@@ -25,113 +30,84 @@ import {
 } from "../../config/trustful";
 import { ADAPTOR_PROGRAM_ID, DISCRIMINATOR } from "../constants/trustful";
 
-const withdrawArbitraryStrategy = async (
-  connection: Connection,
-  managerKp: Keypair,
-  vault: PublicKey,
-  vaultAssetMint: PublicKey,
-  assetTokenProgram: PublicKey,
-  adaptorProgram: PublicKey,
-  strategySeedString: string,
-  instructionDiscriminator: number[],
-  withdrawAmount: BN,
-  endValue: BN,
-  lookupTableAddresses: string[] = []
-) => {
-  const vc = new VoltrClient(connection);
-
-  const [strategy] = PublicKey.findProgramAddressSync(
-    [Buffer.from(strategySeedString)],
-    new PublicKey(adaptorProgram)
+const withdrawArbitraryStrategy = async () => {
+  const payerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8"))
   );
-
-  const { vaultStrategyAuth } = vc.findVaultStrategyAddresses(vault, strategy);
+  const managerSigner = await createKeyPairSignerFromBytes(payerSecret);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
+  const strategy = publicKeyToAddress(
+    PublicKey.findProgramAddressSync(
+      [Buffer.from(strategySeedString)],
+      new PublicKey(ADAPTOR_PROGRAM_ID)
+    )[0]
+  );
+  const [vaultStrategyAuth] = await findVaultStrategyAuthPda({
+    vault: vaultAddress,
+    strategy,
+  });
 
   const [withdrawalHoldingAuth] = PublicKey.findProgramAddressSync(
-    [vaultStrategyAuth.toBuffer(), strategy.toBuffer()],
-    new PublicKey(adaptorProgram)
+    [new PublicKey(vaultStrategyAuth).toBuffer(), new PublicKey(strategy).toBuffer()],
+    new PublicKey(ADAPTOR_PROGRAM_ID)
   );
 
-  let transactionIxs: TransactionInstruction[] = [];
+  const transactionIxs: Instruction[] = [];
 
   const withdrawalHoldingAccount = await setupTokenAccount(
-    connection,
-    managerKp.publicKey,
-    vaultAssetMint,
-    withdrawalHoldingAuth,
+    rpc,
+    managerSigner,
+    assetMintAddress,
+    publicKeyToAddress(withdrawalHoldingAuth),
     transactionIxs,
     assetTokenProgram
   );
 
-  const _vaultStrategyAssetAta = await setupTokenAccount(
-    connection,
-    managerKp.publicKey,
-    vaultAssetMint,
+  await setupTokenAccount(
+    rpc,
+    managerSigner,
+    assetMintAddress,
     vaultStrategyAuth,
     transactionIxs,
     assetTokenProgram
   );
 
-  let additionalArgs = Buffer.from([
-    ...new BN(endValue).toArrayLike(Buffer, "le", 8),
-  ]);
-
-  let remainingAccounts = [
+  const remainingAccounts = [
     { pubkey: withdrawalHoldingAuth, isWritable: false, isSigner: false },
-    { pubkey: withdrawalHoldingAccount, isWritable: true, isSigner: false },
+    {
+      pubkey: new PublicKey(withdrawalHoldingAccount),
+      isWritable: true,
+      isSigner: false,
+    },
   ];
 
-  const createWithdrawStrategyIx = await vc.createWithdrawStrategyIx(
-    {
-      instructionDiscriminator: Buffer.from(instructionDiscriminator),
-      withdrawAmount,
-      additionalArgs,
-    },
-    {
-      manager: managerKp.publicKey,
-      vault,
-      vaultAssetMint,
-      assetTokenProgram,
-      strategy,
-      remainingAccounts,
-      adaptorProgram,
-    }
+  const withdrawStrategyIx = await getWithdrawStrategyInstructionAsync({
+    manager: managerSigner,
+    vault: vaultAddress,
+    strategy,
+    vaultAssetMint: assetMintAddress,
+    assetTokenProgram,
+    adaptorProgram: address(ADAPTOR_PROGRAM_ID),
+    amount: BigInt(new BN(withdrawStrategyAmount).toString()),
+    instructionDiscriminator: new Uint8Array(DISCRIMINATOR.WITHDRAW_ARBITRARY),
+    additionalArgs: new Uint8Array(
+      Buffer.from([...new BN(positionValueAfterWithdraw).toArrayLike(Buffer, "le", 8)])
+    ),
+  });
+
+  transactionIxs.push(
+    appendRemainingAccounts(withdrawStrategyIx, remainingAccounts)
   );
-
-  transactionIxs.push(createWithdrawStrategyIx);
-
-  const lookupTableAccounts = lookupTableAddresses
-    ? await getAddressLookupTableAccounts(lookupTableAddresses, connection)
-    : [];
-
   const txSig = await sendAndConfirmOptimisedTx(
     transactionIxs,
     process.env.HELIUS_RPC_URL!,
-    managerKp,
-    [],
-    lookupTableAccounts
+    managerSigner
   );
   console.log("Arbitrary strategy withdrawed with signature:", txSig);
 };
 
 const main = async () => {
-  const payerKpFile = fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8");
-  const payerKpData = JSON.parse(payerKpFile);
-  const payerSecret = Uint8Array.from(payerKpData);
-  const payerKp = Keypair.fromSecretKey(payerSecret);
-
-  await withdrawArbitraryStrategy(
-    new Connection(process.env.HELIUS_RPC_URL!),
-    payerKp,
-    new PublicKey(vaultAddress),
-    new PublicKey(assetMintAddress),
-    new PublicKey(assetTokenProgram),
-    new PublicKey(ADAPTOR_PROGRAM_ID),
-    strategySeedString,
-    DISCRIMINATOR.WITHDRAW_ARBITRARY,
-    new BN(withdrawStrategyAmount),
-    new BN(positionValueAfterWithdraw)
-  );
+  await withdrawArbitraryStrategy();
 };
 
 main();

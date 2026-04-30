@@ -1,18 +1,25 @@
 import "dotenv/config";
 import * as fs from "fs";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
-import {
-  getAddressLookupTableAccounts,
+  appendRemainingAccounts,
+  createKitSignerFromKeypair,
+  publicKeyToAddress,
   sendAndConfirmOptimisedTx,
   setupTokenAccount,
+  web3InstructionToKit,
 } from "../utils/helper";
 import { AnchorProvider, BN, Program, Wallet } from "@coral-xyz/anchor";
-import { VoltrClient } from "@voltr/vault-sdk";
+import {
+  address,
+  createSolanaRpc,
+  type Instruction,
+} from "@solana/kit";
+import {
+  findStrategyInitReceiptPda,
+  findVaultStrategyAuthPda,
+  getWithdrawStrategyInstructionAsync,
+} from "@voltr/vault-sdk";
 import {
   assetMintAddress,
   vaultAddress,
@@ -27,68 +34,68 @@ import { ADAPTOR_PROGRAM_ID, DISCRIMINATOR } from "../constants/trustful";
 import { VoltrTrustfulAdaptor } from "../idl/voltr_trustful_adaptor";
 import * as idl from "../idl/voltr_trustful_adaptor.json";
 
-const repayCurveStrategy = async (
-  connection: Connection,
-  managerKp: Keypair,
-  vault: PublicKey,
-  vaultAssetMint: PublicKey,
-  assetTokenProgram: PublicKey,
-  adaptorProgramId: PublicKey,
-  strategySeedString: string,
-  instructionDiscriminator: number[],
-  repayAmount: BN,
-  borrowRateBps: number,
-  lookupTableAddresses: string[] = []
-) => {
-  const vc = new VoltrClient(connection);
-
-  const [strategy] = PublicKey.findProgramAddressSync(
-    [Buffer.from(strategySeedString)],
-    new PublicKey(adaptorProgramId)
+const repayCurveStrategy = async () => {
+  const payerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8"))
   );
-
-  const { vaultStrategyAuth } = vc.findVaultStrategyAddresses(vault, strategy);
+  const managerKp = Keypair.fromSecretKey(payerSecret);
+  const managerSigner = await createKitSignerFromKeypair(managerKp);
+  const connection = new Connection(process.env.HELIUS_RPC_URL!);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
+  const strategy = publicKeyToAddress(
+    PublicKey.findProgramAddressSync(
+      [Buffer.from(strategySeedString)],
+      new PublicKey(ADAPTOR_PROGRAM_ID)
+    )[0]
+  );
+  const [vaultStrategyAuth] = await findVaultStrategyAuthPda({
+    vault: vaultAddress,
+    strategy,
+  });
 
   const [withdrawalHoldingAuth] = PublicKey.findProgramAddressSync(
-    [vaultStrategyAuth.toBuffer(), strategy.toBuffer()],
-    new PublicKey(adaptorProgramId)
+    [new PublicKey(vaultStrategyAuth).toBuffer(), new PublicKey(strategy).toBuffer()],
+    new PublicKey(ADAPTOR_PROGRAM_ID)
   );
 
-  let transactionIxs: TransactionInstruction[] = [];
+  const transactionIxs: Instruction[] = [];
 
   const withdrawalHoldingAccount = await setupTokenAccount(
-    connection,
-    managerKp.publicKey,
-    vaultAssetMint,
-    withdrawalHoldingAuth,
+    rpc,
+    managerSigner,
+    assetMintAddress,
+    publicKeyToAddress(withdrawalHoldingAuth),
     transactionIxs,
     assetTokenProgram
   );
 
-  const _vaultStrategyAssetAta = await setupTokenAccount(
-    connection,
-    managerKp.publicKey,
-    vaultAssetMint,
+  await setupTokenAccount(
+    rpc,
+    managerSigner,
+    assetMintAddress,
     vaultStrategyAuth,
     transactionIxs,
     assetTokenProgram
   );
 
-  const strategyInitReceipt = vc.findStrategyInitReceipt(vault, strategy);
+  const [strategyInitReceipt] = await findStrategyInitReceiptPda({
+    vault: vaultAddress,
+    strategy,
+  });
 
-  let remainingAccounts = [
+  const remainingAccounts = [
     {
-      pubkey: strategyInitReceipt,
+      pubkey: new PublicKey(strategyInitReceipt),
       isSigner: false,
       isWritable: false,
     },
     { pubkey: withdrawalHoldingAuth, isWritable: false, isSigner: false },
-    { pubkey: withdrawalHoldingAccount, isWritable: true, isSigner: false },
+    {
+      pubkey: new PublicKey(withdrawalHoldingAccount),
+      isWritable: true,
+      isSigner: false,
+    },
   ];
-
-  let additionalArgs = Buffer.from([
-    ...new BN(borrowRateBps).toArrayLike(Buffer, "le", 2),
-  ]);
 
   const adaptorProgram = new Program<VoltrTrustfulAdaptor>(
     idl as VoltrTrustfulAdaptor,
@@ -96,69 +103,45 @@ const repayCurveStrategy = async (
   );
 
   const transferIx = await adaptorProgram.methods
-    .transferCurve(new BN(repayAmount), borrowRateBps)
+    .transferCurve(new BN(repayStrategyAmount), borrowRateBps)
     .accountsPartial({
       user: managerKp.publicKey,
       authority: vaultStrategyAuth,
-      vaultAssetMint,
+      vaultAssetMint: new PublicKey(assetMintAddress),
       tokenProgram: assetTokenProgram,
       strategyInitReceipt,
     })
     .instruction();
 
-  transactionIxs.push(transferIx);
+  transactionIxs.push(web3InstructionToKit(transferIx));
 
-  const createWithdrawStrategyIx = await vc.createWithdrawStrategyIx(
-    {
-      instructionDiscriminator: Buffer.from(instructionDiscriminator),
-      withdrawAmount: new BN(repayAmount),
-      additionalArgs,
-    },
-    {
-      manager: managerKp.publicKey,
-      vault,
-      vaultAssetMint,
-      assetTokenProgram,
-      strategy,
-      remainingAccounts,
-      adaptorProgram: adaptorProgramId,
-    }
+  const withdrawStrategyIx = await getWithdrawStrategyInstructionAsync({
+    manager: managerSigner,
+    vault: vaultAddress,
+    strategy,
+    vaultAssetMint: assetMintAddress,
+    assetTokenProgram,
+    adaptorProgram: address(ADAPTOR_PROGRAM_ID),
+    amount: BigInt(new BN(repayStrategyAmount).toString()),
+    instructionDiscriminator: new Uint8Array(DISCRIMINATOR.REPAY_CURVE),
+    additionalArgs: new Uint8Array(
+      Buffer.from([...new BN(borrowRateBps).toArrayLike(Buffer, "le", 2)])
+    ),
+  });
+
+  transactionIxs.push(
+    appendRemainingAccounts(withdrawStrategyIx, remainingAccounts)
   );
-
-  transactionIxs.push(createWithdrawStrategyIx);
-
-  const lookupTableAccounts = lookupTableAddresses
-    ? await getAddressLookupTableAccounts(lookupTableAddresses, connection)
-    : [];
-
   const txSig = await sendAndConfirmOptimisedTx(
     transactionIxs,
     process.env.HELIUS_RPC_URL!,
-    managerKp,
-    [],
-    lookupTableAccounts
+    managerSigner
   );
   console.log("Curve strategy repaid with signature:", txSig);
 };
 
 const main = async () => {
-  const payerKpFile = fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8");
-  const payerKpData = JSON.parse(payerKpFile);
-  const payerSecret = Uint8Array.from(payerKpData);
-  const payerKp = Keypair.fromSecretKey(payerSecret);
-
-  await repayCurveStrategy(
-    new Connection(process.env.HELIUS_RPC_URL!),
-    payerKp,
-    new PublicKey(vaultAddress),
-    new PublicKey(assetMintAddress),
-    new PublicKey(assetTokenProgram),
-    new PublicKey(ADAPTOR_PROGRAM_ID),
-    strategySeedString,
-    DISCRIMINATOR.REPAY_CURVE,
-    new BN(repayStrategyAmount),
-    borrowRateBps
-  );
+  await repayCurveStrategy();
 };
 
 main();

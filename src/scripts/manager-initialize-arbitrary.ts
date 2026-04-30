@@ -1,17 +1,22 @@
 import "dotenv/config";
 import * as fs from "fs";
+import { PublicKey } from "@solana/web3.js";
 import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
+  address,
+  createKeyPairSignerFromBytes,
+  createSolanaRpc,
+  type Instruction,
+} from "@solana/kit";
 import {
-  getAddressLookupTableAccounts,
+  getAddressesByLookupTable,
+  publicKeyToAddress,
   sendAndConfirmOptimisedTx,
   setupTokenAccount,
 } from "../utils/helper";
-import { VoltrClient } from "@voltr/vault-sdk";
+import {
+  findVaultStrategyAuthPda,
+  getInitializeStrategyInstructionAsync,
+} from "@voltr/vault-sdk";
 import {
   assetMintAddress,
   vaultAddress,
@@ -20,85 +25,56 @@ import {
 import { strategySeedString } from "../../config/trustful";
 import { ADAPTOR_PROGRAM_ID, DISCRIMINATOR } from "../constants/trustful";
 
-const initializeArbitraryStrategy = async (
-  connection: Connection,
-  payerKp: Keypair,
-  managerKp: Keypair,
-  vault: PublicKey,
-  vaultAssetMint: PublicKey,
-  assetTokenProgram: PublicKey,
-  adaptorProgram: PublicKey,
-  strategySeedString: string,
-  instructionDiscriminator: number[],
-  lookupTableAddresses: string[] = []
-) => {
-  const vc = new VoltrClient(connection);
-
-  const [strategy] = PublicKey.findProgramAddressSync(
-    [Buffer.from(strategySeedString)],
-    new PublicKey(adaptorProgram)
+const initializeArbitraryStrategy = async () => {
+  const payerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8"))
   );
+  const payerSigner = await createKeyPairSignerFromBytes(payerSecret);
+  const rpc = createSolanaRpc(process.env.HELIUS_RPC_URL!);
+  const strategy = publicKeyToAddress(
+    PublicKey.findProgramAddressSync(
+      [Buffer.from(strategySeedString)],
+      new PublicKey(ADAPTOR_PROGRAM_ID)
+    )[0]
+  );
+  const [vaultStrategyAuth] = await findVaultStrategyAuthPda({
+    vault: vaultAddress,
+    strategy,
+  });
 
-  const { vaultStrategyAuth } = vc.findVaultStrategyAddresses(vault, strategy);
+  const transactionIxs: Instruction[] = [];
 
-  let transactionIxs: TransactionInstruction[] = [];
-
-  const _vaultStrategyAssetAta = await setupTokenAccount(
-    connection,
-    managerKp.publicKey,
-    vaultAssetMint,
+  await setupTokenAccount(
+    rpc,
+    payerSigner,
+    assetMintAddress,
     vaultStrategyAuth,
     transactionIxs,
     assetTokenProgram
   );
 
-  const createInitializeStrategyIx = await vc.createInitializeStrategyIx(
-    {
-      instructionDiscriminator: Buffer.from(instructionDiscriminator),
-    },
-    {
-      payer: payerKp.publicKey,
-      manager: managerKp.publicKey,
-      vault,
-      strategy,
-      remainingAccounts: [],
-      adaptorProgram,
-    }
-  );
+  const initializeStrategyIx = await getInitializeStrategyInstructionAsync({
+    payer: payerSigner,
+    manager: payerSigner,
+    vault: vaultAddress,
+    strategy,
+    adaptorProgram: address(ADAPTOR_PROGRAM_ID),
+    instructionDiscriminator: new Uint8Array(DISCRIMINATOR.INITIALIZE_ARBITRARY),
+    additionalArgs: null,
+  });
 
-  transactionIxs.push(createInitializeStrategyIx);
-
-  const lookupTableAccounts = lookupTableAddresses
-    ? await getAddressLookupTableAccounts(lookupTableAddresses, connection)
-    : [];
-
+  transactionIxs.push(initializeStrategyIx);
   const txSig = await sendAndConfirmOptimisedTx(
     transactionIxs,
     process.env.HELIUS_RPC_URL!,
-    managerKp,
-    [],
-    lookupTableAccounts
+    payerSigner,
+    {}
   );
   console.log("Arbitrary strategy initialized with signature:", txSig);
 };
 
 const main = async () => {
-  const payerKpFile = fs.readFileSync(process.env.MANAGER_FILE_PATH!, "utf-8");
-  const payerKpData = JSON.parse(payerKpFile);
-  const payerSecret = Uint8Array.from(payerKpData);
-  const payerKp = Keypair.fromSecretKey(payerSecret);
-
-  await initializeArbitraryStrategy(
-    new Connection(process.env.HELIUS_RPC_URL!),
-    payerKp,
-    payerKp,
-    new PublicKey(vaultAddress),
-    new PublicKey(assetMintAddress),
-    new PublicKey(assetTokenProgram),
-    new PublicKey(ADAPTOR_PROGRAM_ID),
-    strategySeedString,
-    DISCRIMINATOR.INITIALIZE_ARBITRARY
-  );
+  await initializeArbitraryStrategy();
 };
 
 main();

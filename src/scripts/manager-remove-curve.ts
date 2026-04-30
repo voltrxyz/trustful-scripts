@@ -1,66 +1,41 @@
 import "dotenv/config";
 import * as fs from "fs";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-} from "@solana/web3.js";
+import { address, createKeyPairSignerFromBytes } from "@solana/kit";
+import { PublicKey } from "@solana/web3.js";
 import { sendAndConfirmOptimisedTx } from "../utils/helper";
-import { VoltrClient } from "@voltr/vault-sdk";
+import { getCloseStrategyInstructionAsync } from "@voltr/vault-sdk";
 import { vaultAddress } from "../../config/base";
 import { ADAPTOR_PROGRAM_ID, SEEDS } from "../constants/trustful";
 
-const removeCurveStrategy = async (
-  connection: Connection,
-  payerKp: Keypair,
-  managerKp: Keypair,
-  vault: PublicKey,
-  adaptorProgram: PublicKey,
-  strategySeedString: string
-) => {
-  const vc = new VoltrClient(connection);
-
-  const [strategy] = PublicKey.findProgramAddressSync(
-    [Buffer.from(strategySeedString)],
-    new PublicKey(adaptorProgram)
+const removeCurveStrategy = async () => {
+  const payerSecret = Uint8Array.from(
+    JSON.parse(fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8"))
+  );
+  const payerSigner = await createKeyPairSignerFromBytes(payerSecret);
+  const strategy = address(
+    PublicKey.findProgramAddressSync(
+      [Buffer.from(SEEDS.CURVE)],
+      new PublicKey(ADAPTOR_PROGRAM_ID)
+    )[0].toBase58()
   );
 
-  let transactionIxs: TransactionInstruction[] = [];
-
-  const createCloseStrategyIx = await vc.createCloseStrategyIx({
-    payer: payerKp.publicKey,
-    manager: managerKp.publicKey,
-    vault,
+  const closeStrategyIx = await getCloseStrategyInstructionAsync({
+    payer: payerSigner,
+    manager: payerSigner,
+    vault: vaultAddress,
     strategy,
   });
 
-  transactionIxs.push(createCloseStrategyIx);
-
   const txSig = await sendAndConfirmOptimisedTx(
-    transactionIxs,
+    [closeStrategyIx],
     process.env.HELIUS_RPC_URL!,
-    managerKp,
-    [],
-    []
+    payerSigner
   );
   console.log("Curve strategy removed with signature:", txSig);
 };
 
 const main = async () => {
-  const payerKpFile = fs.readFileSync(process.env.ADMIN_FILE_PATH!, "utf-8");
-  const payerKpData = JSON.parse(payerKpFile);
-  const payerSecret = Uint8Array.from(payerKpData);
-  const payerKp = Keypair.fromSecretKey(payerSecret);
-
-  await removeCurveStrategy(
-    new Connection(process.env.HELIUS_RPC_URL!),
-    payerKp,
-    payerKp,
-    new PublicKey(vaultAddress),
-    new PublicKey(ADAPTOR_PROGRAM_ID),
-    SEEDS.CURVE
-  );
+  await removeCurveStrategy();
 };
 
 main();
